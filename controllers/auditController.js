@@ -4,7 +4,6 @@ const cheerio = require("cheerio");
 const https = require("https");
 const { URL } = require("url"); // Import the URL constructor to parse URLs
 const puppeteer = require("puppeteer");
-const { log } = require("console");
 
 exports.getPageSpeedData = async (req, res) => {
   const { url, strategy } = req.body;
@@ -15,7 +14,7 @@ exports.getPageSpeedData = async (req, res) => {
 
   try {
     const response = await axios.get(
-      `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${url}&key=${process.env.GOOGLE_API_KEY}`
+      `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${url}&key=${process.env.GOOGLE_API_KEY}`
     );
 
     res.json(response.data);
@@ -28,27 +27,32 @@ exports.getPageSpeedData = async (req, res) => {
 exports.whoisLookup = async (req, res) => {
   const { url } = req.body;
 
-  if (!url) return res.status(400).json({ error: "Domain is required." });
+  if (!url) {
+    return res.status(400).json({ error: "Domain is required." });
+  }
 
   try {
     const data = await whois(url);
-    res.json(data);
-    console.log(data); // Log the WHOIS data to check the fetched data
+
+    const whoisresult = {
+      domainName: data.domainName || null,
+      owner: data.registrantOrganization || "Not Available",
+      registrar: data.registrar || "Not Available",
+    };
+
+    console.log("WHOIS Data:", whoisresult); // log for debugging
+    return res.json(whoisresult);
   } catch (err) {
-    res.status(500).json({ error: "WHOIS lookup failed." });
-    console.error(err);
+    console.error("WHOIS Error:", err);
+    return res.status(500).json({ error: "WHOIS lookup failed." });
   }
 };
 
 exports.metataganalysis = async (req, res) => {
   const { url } = req.body;
 
-  if (!url || !url.startsWith("http")) {
-    return res.status(400).json({ error: "Invalid or missing URL" });
-  }
-
   try {
-    const response = await axios.get(url);
+    const response = await axios.get(`https://${url}`);
     const $ = cheerio.load(response.data);
 
     const getMeta = (name) =>
@@ -74,7 +78,7 @@ exports.metataganalysis = async (req, res) => {
 
     res.json({ success: true, meta: metaData });
   } catch (error) {
-    console.error("Error analyzing meta tags:", error.message);
+    console.log("Error analyzing meta tags:", error.message);
     res.status(500).json({ error: "Failed to analyze meta tags" });
   }
 };
@@ -87,7 +91,7 @@ exports.headingstructure = async (req, res) => {
   }
 
   try {
-    const response = await axios.get(url);
+    const response = await axios.get(`https://${url}`);
     const $ = cheerio.load(response.data);
 
     const headingTags = [];
@@ -143,7 +147,7 @@ exports.httpsCheck = async (req, res) => {
 
   let parsedUrl;
   try {
-    parsedUrl = new URL(siteUrl);
+    parsedUrl = new URL(`https://${siteUrl}`);
   } catch {
     return res.status(400).json({ error: "Invalid URL format" });
   }
@@ -207,7 +211,7 @@ exports.httpsCheck = async (req, res) => {
 
 exports.backlinkAnalysis = async (req, res) => {
   const { siteUrl } = req.body;
-  log("URL:", siteUrl); // Log the URL to check if it's being received correctly
+  console.log("URL:", siteUrl);
 
   if (!siteUrl) return res.status(400).json({ error: "Domain is required" });
 
@@ -218,11 +222,19 @@ exports.backlinkAnalysis = async (req, res) => {
     });
 
     const page = await browser.newPage();
-    const url = `https://openlinkprofiler.org/r/${siteUrl}`;
-    await page.goto(url, { waitUntil: "networkidle2" });
+    const url = `https://openlinkprofiler.org/r/http://${siteUrl}`; // Changed to http
+    await page.goto(url, { waitUntil: "domcontentloaded" });
 
-    // Wait for backlinks table
-    await page.waitForSelector("#backlinktable tbody tr", { timeout: 60000 });
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+    // Give JS time to render table
+
+    try {
+      await page.waitForSelector("#backlinktable tbody tr", { timeout: 30000 });
+    } catch (selectorError) {
+      throw new Error(
+        "Backlink table not found. It may not have loaded or the selector is incorrect."
+      );
+    }
 
     const backlinks = await page.evaluate(() => {
       const rows = Array.from(
@@ -231,17 +243,17 @@ exports.backlinkAnalysis = async (req, res) => {
       return rows.slice(0, 10).map((row) => {
         const cells = row.querySelectorAll("td");
         return {
-          source: cells[1]?.innerText?.trim(),
-          anchor: cells[2]?.innerText?.trim(),
-          linkType: cells[4]?.innerText?.trim(),
+          source: cells[1]?.innerText?.trim() || "N/A",
+          anchor: cells[2]?.innerText?.trim() || "N/A",
+          linkType: cells[4]?.innerText?.trim() || "N/A",
         };
       });
     });
 
     await browser.close();
-    res.json({ domain, backlinks });
+    res.json({ domain: siteUrl, backlinks });
   } catch (err) {
     console.error("Scraping error:", err.message);
-    res.status(500).json({ error: "Failed to fetch backlinks." });
+    res.status(500).json({ backlinks: "No backlinks found." });
   }
 };
